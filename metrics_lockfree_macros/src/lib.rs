@@ -19,7 +19,7 @@ fn debug_print_generated(ast: &DeriveInput, toks: &TokenStream) {
 }
 
 //use crate::helpers::{case_style::snakify, non_enum_error, HasStrumVariantProperties};
-use quote::{format_ident, quote, ToTokens};
+use quote::{format_ident, quote};
 
 fn non_struct_error() -> syn::Error {
     syn::Error::new(Span::call_site(), "This macro only supports structs.")
@@ -138,8 +138,8 @@ fn generate_metrics(ast: &DeriveInput) -> syn::Result<TokenStream> {
             }
         }
 
-        static #static_factory_name : LazyLock<RwLock<#factory_name>> =
-            LazyLock::new(|| RwLock::new(#factory_name ::new(&["a", "b"])));
+        static #static_factory_name : std::sync::LazyLock<std::sync::RwLock<#factory_name>> =
+            std::sync::LazyLock::new(|| std::sync::RwLock::new(#factory_name ::new(&["a", "b"])));
 
         fn #factory_build_fn() -> #struct_name {
             let mut factory = #static_factory_name.write().unwrap();
