@@ -5,25 +5,25 @@ use lockfree_metrics_macros::Metrics;
 
 #[derive(Metrics)]
 pub struct MyMetrics {
-    a: u64,
-    b: u64,
+    c: u64,
+    d: u64,
 }
 
 fn main() {
     println!("Hello, world!");
 
-    let mut thread1 = my_metrics_create();
+    let mut thread1 = MyMetrics::new();
 
     let t1 = spawn(move || loop {
-        thread1.add_a(1);
-        thread1.add_b(1);
+        thread1.add_c(1);
+        thread1.add_d(1);
         std::hint::black_box(&thread1);
     });
 
-    let mut thread2 = my_metrics_create();
+    let mut thread2 = MyMetrics::new();
 
     let t2 = spawn(move || loop {
-        thread2.add_b(1);
+        thread2.add_c(1);
         std::hint::black_box(&thread2);
     });
 
@@ -31,7 +31,7 @@ fn main() {
     let stat_thread = spawn(|| loop {
         sleep(Duration::from_secs(1));
 
-        let factory = MYMETRICSFACTORY.read().unwrap();
+        let factory = MyMetrics::read_lock().unwrap();
         let metrics = factory.metrics();
         let mut values = vec![0; metrics.len()];
 

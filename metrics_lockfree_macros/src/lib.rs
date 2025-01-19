@@ -1,7 +1,7 @@
 extern crate proc_macro;
 
 use heck::ToSnakeCase;
-use proc_macro2::{Ident, Span, TokenStream};
+use proc_macro2::{Span, TokenStream};
 use std::env;
 use syn::{Data, DeriveInput};
 
@@ -19,7 +19,7 @@ fn debug_print_generated(ast: &DeriveInput, toks: &TokenStream) {
 }
 
 //use crate::helpers::{case_style::snakify, non_enum_error, HasStrumVariantProperties};
-use quote::{format_ident, quote};
+use quote::{format_ident, quote, ToTokens};
 
 fn non_struct_error() -> syn::Error {
     syn::Error::new(Span::call_site(), "This macro only supports structs.")
@@ -48,21 +48,22 @@ fn generate_metrics(ast: &DeriveInput) -> syn::Result<TokenStream> {
         _ => return Err(non_struct_error()),
     };
 
-    let static_factory_name = Ident::new(
-        &format!("{}Factory", &ast.ident).to_uppercase(),
-        Span::call_site(),
-    );
+    let static_factory_name = format_ident!("{}", format!("{}Factory", &ast.ident).to_uppercase());
     let factory_name = format_ident!("{}Factory", &ast.ident);
-    let factory_build_fn = format_ident!("{}_create", snakify(&ast.ident.to_string()));
-    let struct_name = format_ident!("{}Values", &ast.ident);
+    let values_name = format_ident!("{}Values", &ast.ident);
+    let struct_name = ast.ident.clone();
 
     let mut count = 0;
+
+    let mut field_names = vec![];
+
     let fields: Vec<_> = fields
         .iter()
         .filter_map(|field| match &field.ident {
             Some(ident) => {
                 let ident = ident.to_string();
                 let fn_name = format_ident!("add_{}", snakify(&ident));
+                field_names.push(ident.to_token_stream());
                 let idx: usize = count;
                 count += 1;
                 Some(quote! {
@@ -76,21 +77,32 @@ fn generate_metrics(ast: &DeriveInput) -> syn::Result<TokenStream> {
         .collect();
 
     Ok(quote! {
-        pub struct #struct_name {
+        impl #struct_name {
+            pub fn new() -> #values_name {
+                let mut factory = #static_factory_name.write().unwrap();
+                factory.build()
+            }
+
+            pub fn read_lock<'a>() -> std::sync::LockResult<std::sync::RwLockReadGuard<'a, #factory_name>> {
+                #static_factory_name.read()
+            }
+        }
+
+        pub struct #values_name {
             ptr: *mut u64,
             size: usize,
         }
 
-        impl #struct_name {
+        impl #values_name {
 
-            pub fn new(list: &mut [u64]) -> Self {
+            fn new(list: &mut [u64]) -> Self {
                 Self {
                     ptr: list.as_mut_ptr(),
                     size: list.len(),
                 }
             }
 
-            pub fn add(&mut self, idx: usize, inc: u64) {
+            fn add(&mut self, idx: usize, inc: u64) {
                 if idx >= self.size {
                     panic!("idx overflow");
                 }
@@ -107,7 +119,7 @@ fn generate_metrics(ast: &DeriveInput) -> syn::Result<TokenStream> {
             #(#fields)*
         }
 
-        unsafe impl Send for #struct_name {}
+        unsafe impl Send for #values_name {}
 
         struct #factory_name {
             metrics: Vec<String>,
@@ -123,10 +135,10 @@ fn generate_metrics(ast: &DeriveInput) -> syn::Result<TokenStream> {
                 }
             }
 
-            pub fn build(&mut self) -> #struct_name {
+            pub fn build(&mut self) -> #values_name {
                 self.per_thread_metrics.push(vec![0; self.metrics.len()]);
                 let last = self.per_thread_metrics.last_mut().unwrap();
-                #struct_name ::new(last)
+                #values_name ::new(last)
             }
 
             pub fn thread(&self) -> &Vec<Vec<u64>> {
@@ -139,12 +151,7 @@ fn generate_metrics(ast: &DeriveInput) -> syn::Result<TokenStream> {
         }
 
         static #static_factory_name : std::sync::LazyLock<std::sync::RwLock<#factory_name>> =
-            std::sync::LazyLock::new(|| std::sync::RwLock::new(#factory_name ::new(&["a", "b"])));
-
-        fn #factory_build_fn() -> #struct_name {
-            let mut factory = #static_factory_name.write().unwrap();
-            factory.build()
-        }
+            std::sync::LazyLock::new(|| std::sync::RwLock::new(#factory_name ::new(&[ #(#field_names),* ])));
 
     })
 }
