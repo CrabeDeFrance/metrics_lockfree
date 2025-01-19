@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+metrics_lockfree = { path = "../metrics_lockfree/" }
 lockfree_metrics_macros = { path = "../metrics_lockfree_macros/" }
 prometheus = "0.13.4"
 protobuf = "3.7.1"

@@ -49,15 +49,32 @@ fn main() {
 
         (0..metrics.len()).for_each(|idx| {
             let mut metricfamily = MetricFamily::new();
-            metricfamily.set_name(metrics[idx].clone());
-            metricfamily.set_field_type(MetricType::COUNTER);
+            let metricfamily = match &metrics[idx] {
+                metrics_lockfree::InternalMetricTypeString::Counter(name) => {
+                    metricfamily.set_name(name.clone());
+                    metricfamily.set_field_type(MetricType::COUNTER);
 
-            let mut counter = Counter::new();
-            counter.set_value(values[idx] as f64);
-            let mut metric = Metric::new();
-            metric.set_counter(counter);
+                    let mut counter = Counter::new();
+                    counter.set_value(values[idx] as f64);
+                    let mut metric = Metric::new();
+                    metric.set_counter(counter);
 
-            metricfamily.mut_metric().push(metric);
+                    metricfamily.mut_metric().push(metric);
+                    metricfamily
+                }
+                metrics_lockfree::InternalMetricTypeString::Gauge(name) => {
+                    metricfamily.set_name(name.clone());
+                    metricfamily.set_field_type(MetricType::GAUGE);
+
+                    let mut gauge = Gauge::new();
+                    gauge.set_value(values[idx] as f64);
+                    let mut metric = Metric::new();
+                    metric.set_gauge(gauge);
+
+                    metricfamily.mut_metric().push(metric);
+                    metricfamily
+                }
+            };
 
             metricfamilies.push(metricfamily);
         });

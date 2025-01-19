@@ -4,7 +4,8 @@ use heck::ToSnakeCase;
 use metrics_lockfree::MetricType;
 use proc_macro2::{Span, TokenStream};
 use std::env;
-use syn::{Data, DeriveInput, Lit, LitStr};
+use syn::{Data, DeriveInput};
+//use syn::{Lit, LitStr};
 
 fn debug_print_generated(ast: &DeriveInput, toks: &TokenStream) {
     let debug = env::var("METRICS_MACROS_DEBUG");
@@ -77,6 +78,8 @@ fn generate_metrics(ast: &DeriveInput) -> syn::Result<TokenStream> {
 
     let mut field_names = vec![];
 
+    let mut field_names_types = vec![];
+
     let fields: Vec<_> = fields
         .iter()
         .filter_map(|field| match &field.ident {
@@ -97,9 +100,17 @@ fn generate_metrics(ast: &DeriveInput) -> syn::Result<TokenStream> {
                 }
                 .to_string();
 
+                let ident_str = ident.to_string();
+
                 let t = match t.as_str() {
-                    "Counter" => MetricType::Counter,
-                    "Gauge" => MetricType::Gauge,
+                    "Counter" => {
+                        field_names_types.push(quote!(metrics_lockfree::InternalMetricType::Counter(#ident_str)));
+                        MetricType::Counter
+                    }
+                    "Gauge" => {
+                        field_names_types.push(quote!(metrics_lockfree::InternalMetricType::Gauge(#ident_str)));
+                        MetricType::Gauge
+                    }
                     _ => panic!(
                         "Error: field '{}' has invalid type: '{t}'. It must be 'Counter' or 'Gauge'",
                         ident
@@ -111,8 +122,6 @@ fn generate_metrics(ast: &DeriveInput) -> syn::Result<TokenStream> {
                 //    "{}",
                 //    parse_field_doc_comment(&field.attrs).unwrap_or_default()
                 //);
-
-                let doc = format_ident!("unknown_doc").to_string().to_token_stream();
                 field_names.push(ident.to_token_stream());
                 let idx: usize = count;
                 count += 1;
@@ -121,9 +130,8 @@ fn generate_metrics(ast: &DeriveInput) -> syn::Result<TokenStream> {
                     MetricType::Counter => {
                         let fn_name = format_ident!("add_{}", snakify(&ident));
                         Some(quote! {
-
                             pub fn #fn_name(&mut self, inc: u64) {
-                                println!("doc is: {}", #doc);
+                                //println!("doc is: {}", #doc);
                                 self.add(#idx, inc)
                             }
                         })
@@ -132,16 +140,13 @@ fn generate_metrics(ast: &DeriveInput) -> syn::Result<TokenStream> {
                     MetricType::Gauge => {
                         let fn_name = format_ident!("set_{}", snakify(&ident));
                         Some(quote! {
-
                             pub fn #fn_name(&mut self, value: u64) {
-                                println!("doc is: {}", #doc);
+                                //println!("doc is: {}", #doc);
                                 self.add(#idx, value)
                             }
                         })
                     }
-
                 }
-
             }
             None => None,
         })
@@ -207,13 +212,13 @@ fn generate_metrics(ast: &DeriveInput) -> syn::Result<TokenStream> {
         unsafe impl Send for #values_name {}
 
         struct #factory_name {
-            metrics: Vec<String>,
+            metrics: Vec<metrics_lockfree::InternalMetricTypeString>,
             per_thread_metrics: Vec<Vec<u64>>,
         }
 
         impl #factory_name {
-            pub fn new(array: &[&str]) -> Self {
-                let metrics = array.iter().map(|s| s.to_string()).collect();
+            pub fn new<'a>(array: &[metrics_lockfree::InternalMetricType<'a>]) -> Self {
+                let metrics = array.iter().map(|s| metrics_lockfree::InternalMetricTypeString::from(s)).collect();
                 Self {
                     metrics,
                     per_thread_metrics: vec![],
@@ -230,13 +235,13 @@ fn generate_metrics(ast: &DeriveInput) -> syn::Result<TokenStream> {
                 &self.per_thread_metrics
             }
 
-            pub fn metrics(&self) -> &Vec<String> {
+            pub fn metrics(&self) -> &Vec<metrics_lockfree::InternalMetricTypeString> {
                 &self.metrics
             }
         }
 
         static #static_factory_name : std::sync::LazyLock<std::sync::RwLock<#factory_name>> =
-            std::sync::LazyLock::new(|| std::sync::RwLock::new(#factory_name ::new(&[ #(#field_names),* ])));
+            std::sync::LazyLock::new(|| std::sync::RwLock::new(#factory_name ::new(&[ #(#field_names_types),* ])));
 
     })
 }
