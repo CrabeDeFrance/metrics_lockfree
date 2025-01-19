@@ -1,9 +1,10 @@
 extern crate proc_macro;
 
 use heck::ToSnakeCase;
+use metrics_lockfree::MetricType;
 use proc_macro2::{Span, TokenStream};
 use std::env;
-use syn::{Data, DeriveInput};
+use syn::{Data, DeriveInput, Lit, LitStr};
 
 fn debug_print_generated(ast: &DeriveInput, toks: &TokenStream) {
     let debug = env::var("METRICS_MACROS_DEBUG");
@@ -42,6 +43,25 @@ fn snakify(s: &str) -> String {
     output.into_iter().collect()
 }
 
+/*
+fn parse_field_doc_comment(attrs: &[syn::Attribute]) -> Option<String> {
+    for attr in attrs {
+        let meta = attr.parse_args().unwrap();
+        if let syn::Meta::NameValue(meta) = meta {
+            match meta.value {
+                syn::Expr::Lit(doc) => match doc.lit {
+                    syn::Lit::Str(doc) => return Some(doc.value().trim().to_string()),
+                    _ => (),
+                },
+                _ => (),
+            }
+        }
+    }
+
+    None
+}
+*/
+
 fn generate_metrics(ast: &DeriveInput) -> syn::Result<TokenStream> {
     let fields = match &ast.data {
         Data::Struct(v) => &v.fields,
@@ -61,16 +81,67 @@ fn generate_metrics(ast: &DeriveInput) -> syn::Result<TokenStream> {
         .iter()
         .filter_map(|field| match &field.ident {
             Some(ident) => {
+                let t = match &field.ty {
+                    syn::Type::Path(t) => {
+                        if let Some(p) = t.path.get_ident() {
+                            p.to_owned()
+                        } else {
+                            panic!("Error: field '{}' is not a simple type", ident)
+                        }
+                    }
+                    _ => {
+                        // unknown ident type, ignore
+                        // TODO should panic with error message
+                        panic!("Error: field '{}' has invalid type. It must be 'Counter' or 'Gauge'", ident);
+                    }
+                }
+                .to_string();
+
+                let t = match t.as_str() {
+                    "Counter" => MetricType::Counter,
+                    "Gauge" => MetricType::Gauge,
+                    _ => panic!(
+                        "Error: field '{}' has invalid type: '{t}'. It must be 'Counter' or 'Gauge'",
+                        ident
+                    ),
+                };
+
                 let ident = ident.to_string();
-                let fn_name = format_ident!("add_{}", snakify(&ident));
+                //let doc = format_ident!(
+                //    "{}",
+                //    parse_field_doc_comment(&field.attrs).unwrap_or_default()
+                //);
+
+                let doc = format_ident!("unknown_doc").to_string().to_token_stream();
                 field_names.push(ident.to_token_stream());
                 let idx: usize = count;
                 count += 1;
-                Some(quote! {
-                    pub fn #fn_name(&mut self, inc: u64) {
-                        self.add(#idx, 1)
+
+                match t {
+                    MetricType::Counter => {
+                        let fn_name = format_ident!("add_{}", snakify(&ident));
+                        Some(quote! {
+
+                            pub fn #fn_name(&mut self, inc: u64) {
+                                println!("doc is: {}", #doc);
+                                self.add(#idx, inc)
+                            }
+                        })
                     }
-                })
+
+                    MetricType::Gauge => {
+                        let fn_name = format_ident!("set_{}", snakify(&ident));
+                        Some(quote! {
+
+                            pub fn #fn_name(&mut self, value: u64) {
+                                println!("doc is: {}", #doc);
+                                self.add(#idx, value)
+                            }
+                        })
+                    }
+
+                }
+
             }
             None => None,
         })
@@ -113,6 +184,20 @@ fn generate_metrics(ast: &DeriveInput) -> syn::Result<TokenStream> {
                 unsafe {
                     let ptr = self.ptr.add(idx);
                     *ptr += inc;
+                }
+            }
+
+            fn set(&mut self, idx: usize, val: u64) {
+                if idx >= self.size {
+                    panic!("idx overflow");
+                }
+
+                // c'est safe, parce que metric list ne peut pas etre dans deux threads à la fois
+                // il ne faut jamais que cet objet puisse etre cloné
+                // rust interdit un utilisateur de le faire parce que l'objet contient un pointeur
+                unsafe {
+                    let ptr = self.ptr.add(idx);
+                    *ptr = val;
                 }
             }
 

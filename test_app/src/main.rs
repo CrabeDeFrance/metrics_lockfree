@@ -5,18 +5,22 @@ use lockfree_metrics_macros::Metrics;
 
 #[derive(Metrics)]
 pub struct MyMetrics {
-    c: u64,
-    d: u64,
+    // doc type c
+    c: Counter,
+    // doc type d
+    //#[max_cardinality = "1000"]
+    d: Gauge,
 }
 
-fn main() {
-    println!("Hello, world!");
+use prometheus::proto::{Counter, Gauge, Metric, MetricFamily, MetricType};
+use prometheus::TextEncoder;
 
+fn main() {
     let mut thread1 = MyMetrics::new();
 
     let t1 = spawn(move || loop {
         thread1.add_c(1);
-        thread1.add_d(1);
+        thread1.set_d(1);
         std::hint::black_box(&thread1);
     });
 
@@ -41,9 +45,28 @@ fn main() {
                 .for_each(|(idx, v)| values[idx] += v);
         });
 
+        let mut metricfamilies = vec![];
+
         (0..metrics.len()).for_each(|idx| {
-            println!("{}: {}", metrics[idx], values[idx]);
+            let mut metricfamily = MetricFamily::new();
+            metricfamily.set_name(metrics[idx].clone());
+            metricfamily.set_field_type(MetricType::COUNTER);
+
+            let mut counter = Counter::new();
+            counter.set_value(values[idx] as f64);
+            let mut metric = Metric::new();
+            metric.set_counter(counter);
+
+            metricfamily.mut_metric().push(metric);
+
+            metricfamilies.push(metricfamily);
         });
+
+        let encoder = TextEncoder::new();
+        let encoded = encoder.encode_to_string(&metricfamilies).unwrap();
+
+        //    println!("{}: {}", metrics[idx], values[idx]);
+        println!("{encoded}");
     });
 
     let _ = t1.join();

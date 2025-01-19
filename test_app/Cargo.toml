@@ -5,3 +5,5 @@ edition = "2021"
 
 [dependencies]
 lockfree_metrics_macros = { path = "../metrics_lockfree_macros/" }
+prometheus = "0.13.4"
+protobuf = "3.7.1"
