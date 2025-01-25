@@ -1,92 +1,51 @@
-use std::thread::{sleep, spawn};
-use std::time::Duration;
+use std::thread::spawn;
 
-use lockfree_metrics_macros::Metrics;
+use metrics_lockfree::{counter::Counter, counter_with_tags::CounterWithTags, gauge::Gauge};
+
+use metrics_lockfree_macros::Metrics;
 
 #[derive(Metrics)]
 pub struct MyMetrics {
     // doc type c
     c: Counter,
-    // doc type d
-    //#[max_cardinality = "1000"]
-    d: Gauge,
+
+    g: Gauge,
+    ct: CounterWithTags<32>,
 }
 
-use prometheus::proto::{Counter, Gauge, Metric, MetricFamily, MetricType};
-use prometheus::TextEncoder;
-
 fn main() {
-    let mut thread1 = MyMetrics::new();
+    let binding = "127.0.0.1:9186".parse().unwrap();
+    metrics_lockfree::Exporter::start(binding).unwrap();
 
+    let mut thread1 = MyMetrics::new().unwrap();
     let t1 = spawn(move || loop {
-        thread1.add_c(1);
-        thread1.set_d(1);
+        thread1.c.add(1);
+        thread1
+            .ct
+            .add(1, &[("key_a".to_string(), "val_b".to_string())]);
+        thread1.ct.add(
+            1,
+            &[
+                ("key_a".to_string(), "val_b".to_string()),
+                ("key_b".to_string(), "val_c".to_string()),
+            ],
+        );
+
         std::hint::black_box(&thread1);
     });
 
-    let mut thread2 = MyMetrics::new();
-
+    let mut thread2 = MyMetrics::new().unwrap();
     let t2 = spawn(move || loop {
-        thread2.add_c(1);
+        thread2.c.add(1);
+        thread2.g.set(1);
+
+        // for tags
+        thread2
+            .ct
+            .add(1, &[("key_a".to_string(), "val_a".to_string())]);
         std::hint::black_box(&thread2);
-    });
-
-    // thread de collect et d'agrégation
-    let stat_thread = spawn(|| loop {
-        sleep(Duration::from_secs(1));
-
-        let factory = MyMetrics::read_lock().unwrap();
-        let metrics = factory.metrics();
-        let mut values = vec![0; metrics.len()];
-
-        factory.thread().iter().for_each(|list| {
-            list.iter()
-                .enumerate()
-                .for_each(|(idx, v)| values[idx] += v);
-        });
-
-        let mut metricfamilies = vec![];
-
-        (0..metrics.len()).for_each(|idx| {
-            let mut metricfamily = MetricFamily::new();
-            let metricfamily = match &metrics[idx] {
-                metrics_lockfree::InternalMetricTypeString::Counter(name) => {
-                    metricfamily.set_name(name.clone());
-                    metricfamily.set_field_type(MetricType::COUNTER);
-
-                    let mut counter = Counter::new();
-                    counter.set_value(values[idx] as f64);
-                    let mut metric = Metric::new();
-                    metric.set_counter(counter);
-
-                    metricfamily.mut_metric().push(metric);
-                    metricfamily
-                }
-                metrics_lockfree::InternalMetricTypeString::Gauge(name) => {
-                    metricfamily.set_name(name.clone());
-                    metricfamily.set_field_type(MetricType::GAUGE);
-
-                    let mut gauge = Gauge::new();
-                    gauge.set_value(values[idx] as f64);
-                    let mut metric = Metric::new();
-                    metric.set_gauge(gauge);
-
-                    metricfamily.mut_metric().push(metric);
-                    metricfamily
-                }
-            };
-
-            metricfamilies.push(metricfamily);
-        });
-
-        let encoder = TextEncoder::new();
-        let encoded = encoder.encode_to_string(&metricfamilies).unwrap();
-
-        //    println!("{}: {}", metrics[idx], values[idx]);
-        println!("{encoded}");
     });
 
     let _ = t1.join();
     let _ = t2.join();
-    let _ = stat_thread.join();
 }

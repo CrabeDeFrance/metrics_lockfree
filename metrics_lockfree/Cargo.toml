@@ -4,3 +4,8 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+ascii = "1"
+prometheus = "0.13"
+protobuf = "2"
+ahash = "0.8"
+tiny_http = { version = "0.12", default-features = false }

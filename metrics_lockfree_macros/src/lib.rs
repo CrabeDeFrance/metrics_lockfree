@@ -1,10 +1,9 @@
 extern crate proc_macro;
 
 use heck::ToSnakeCase;
-use metrics_lockfree::MetricType;
-use proc_macro2::{Span, TokenStream};
+use proc_macro2::{Ident, Span, TokenStream};
 use std::env;
-use syn::{Data, DeriveInput};
+use syn::{Data, DeriveInput, Fields};
 //use syn::{Lit, LitStr};
 
 fn debug_print_generated(ast: &DeriveInput, toks: &TokenStream) {
@@ -20,7 +19,6 @@ fn debug_print_generated(ast: &DeriveInput, toks: &TokenStream) {
     }
 }
 
-//use crate::helpers::{case_style::snakify, non_enum_error, HasStrumVariantProperties};
 use quote::{format_ident, quote, ToTokens};
 
 fn non_struct_error() -> syn::Error {
@@ -63,6 +61,300 @@ fn parse_field_doc_comment(attrs: &[syn::Attribute]) -> Option<String> {
 }
 */
 
+fn generate_impl_user_struct(user_struct_name: &Ident, static_factory_name: &Ident) -> TokenStream {
+    quote! {
+        unsafe impl Send for #user_struct_name {}
+
+        impl MyMetrics {
+            pub fn new() -> Option<#user_struct_name> {
+                if let Ok(mut factory) = #static_factory_name.write() {
+                    Some(factory.build())
+                } else {
+                    None
+                }
+            }
+        }
+    }
+}
+
+fn generate_tags_global_fn(user_struct_name: &Ident, field_name: &Ident) -> Ident {
+    format_ident!(
+        "{}_{}_tags_get",
+        snakify(user_struct_name.to_string().as_str()),
+        field_name
+    )
+}
+
+fn generate_factory(
+    fields: &Fields,
+    user_struct_name: &Ident,
+    values_struct_name: &Ident,
+    factory_struct_name: &Ident,
+    static_factory_name: &Ident,
+) -> TokenStream {
+    let mut metrics = vec![];
+    let mut metrics_tags_hashmap = vec![];
+
+    let metrics_tags_static_prefix = format_ident!(
+        "{}",
+        format!("{}_TAGS_HASHMAP_", user_struct_name.to_string()).to_uppercase()
+    );
+
+    for field in fields {
+        let ident = if let Some(ident) = &field.ident {
+            ident
+        } else {
+            continue;
+        };
+        let ident_str = ident.to_string();
+
+        let ty = MacroFieldType::from(&field.ty);
+
+        // fill types
+        match ty {
+            MacroFieldType::Counter => {
+                metrics.push(quote! {
+                    let mut value_sum = 0;
+                    factory.threads().iter().for_each(|f| {
+                        value_sum += f.#ident.get();
+                    });
+
+                    metrics.push(metrics_lockfree::prometheus::prometheus_metric_family_build(
+                        metrics_lockfree::types::MetricType::Counter,
+                        #ident_str,
+                        value_sum,
+                        None,
+                    ));
+                });
+            }
+            MacroFieldType::Gauge => {
+                metrics.push(quote! {
+                    let mut value_sum = 0;
+                    factory.threads().iter().for_each(|f| {
+                        value_sum += f.#ident.get();
+                    });
+
+                    metrics.push(metrics_lockfree::prometheus::prometheus_metric_family_build(
+                        metrics_lockfree::types::MetricType::Gauge,
+                        #ident_str,
+                        value_sum,
+                        None,
+                    ));
+                });
+            }
+            MacroFieldType::CounterWithTags(max_tags) => {
+                let static_hashmap_name = format_ident!(
+                    "{}_{}",
+                    metrics_tags_static_prefix,
+                    ident.to_string().to_uppercase()
+                );
+
+                metrics.push(quote! {
+                    let mut value_sum = 0;
+                    factory.threads().iter().for_each(|f| {
+                        value_sum += f.#ident.get(0);
+                    });
+
+                    metrics.push(metrics_lockfree::prometheus::prometheus_metric_family_build(
+                        metrics_lockfree::types::MetricType::CounterWithTags,
+                        #ident_str,
+                        value_sum,
+                        None,
+                    ));
+
+                    // then other tags
+                    #static_hashmap_name
+                        .read()
+                        .unwrap()
+                        .tags()
+                        .iter()
+                        .for_each(|(key_value, id)| {
+                            let mut value_sum_tag = 0;
+                            factory.threads().iter().for_each(|f| {
+                                value_sum_tag += f.#ident.get(*id);
+                            });
+
+                            metrics.push(metrics_lockfree::prometheus::prometheus_metric_family_build(
+                                metrics_lockfree::types::MetricType::CounterWithTags,
+                                #ident_str,
+                                value_sum_tag,
+                                Some(key_value),
+                            ));
+                        });
+
+                });
+
+                let fn_name = generate_tags_global_fn(user_struct_name, ident);
+
+                metrics_tags_hashmap.push(quote! {
+                    static #static_hashmap_name: std::sync::LazyLock<std::sync::RwLock<metrics_lockfree::types::Tags>> =
+                        std::sync::LazyLock::new(|| std::sync::RwLock::new(metrics_lockfree::types::Tags::new(#max_tags)));
+
+                    pub fn #fn_name(tags: &[(String, String)]) -> Option<usize> {
+                        if let Some(id) = #static_hashmap_name.read().unwrap().get(tags) {
+                            return Some(id);
+                        }
+                        #static_hashmap_name.write().unwrap().insert(tags)
+                    }
+                });
+            }
+            MacroFieldType::Unknown(s) => panic!(
+                "Error: field '{}' has invalid type: '{s}'. It must be 'Counter' or 'Gauge'",
+                ident
+            ),
+        };
+    }
+
+    quote! {
+
+        struct #factory_struct_name {
+            per_thread_metrics: Vec<#values_struct_name>,
+        }
+
+        impl #factory_struct_name {
+            pub fn new() -> Self {
+                metrics_lockfree::Exporter::register(#factory_struct_name::metrics);
+                Self {
+                    per_thread_metrics: vec![],
+                }
+            }
+
+            pub fn build(&mut self) -> #user_struct_name {
+                // todo push per type
+
+                self.per_thread_metrics.push(#values_struct_name::default());
+                let last = self.per_thread_metrics.last_mut().unwrap();
+                #user_struct_name::from(last)
+            }
+
+            pub fn threads(&self) -> &Vec<#values_struct_name> {
+                &self.per_thread_metrics
+            }
+
+            pub fn metrics() -> Vec<prometheus::proto::MetricFamily> {
+                let mut metrics = vec![];
+
+                if let Ok(factory) = #static_factory_name.read() {
+
+                    #(#metrics)*
+                }
+
+                metrics
+            }
+
+        }
+
+        static #static_factory_name : std::sync::LazyLock<std::sync::RwLock<#factory_struct_name>> =
+            std::sync::LazyLock::new(|| std::sync::RwLock::new(#factory_struct_name ::new()));
+
+        #(#metrics_tags_hashmap)*
+    }
+}
+
+enum MacroFieldType {
+    Counter,
+    Gauge,
+    CounterWithTags(usize),
+    Unknown(String),
+}
+
+impl From<&syn::Type> for MacroFieldType {
+    fn from(value: &syn::Type) -> Self {
+        match value {
+            syn::Type::Path(tp) => {
+                if let Some(p) = tp.path.get_ident() {
+                    match p.to_string().as_str() {
+                        "Counter" => MacroFieldType::Counter,
+                        "Gauge" => MacroFieldType::Gauge,
+                        s @ _ => MacroFieldType::Unknown(s.to_string()),
+                    }
+                } else {
+                    // faut passer en raw quand il y a une generic, pour l'instant on ignore
+                    let mut ty = vec![];
+
+                    tp.path
+                        .to_token_stream()
+                        .into_token_stream()
+                        .into_iter()
+                        .for_each(|t| ty.push(t.to_string()));
+
+                    if ty.len() == 4 && ty[1] == "<" && ty[3] == ">" {
+                        if let Ok(max_tags) = ty[2].parse::<usize>() {
+                            return MacroFieldType::CounterWithTags(max_tags);
+                        }
+                    }
+
+                    MacroFieldType::Unknown(ty.join(""))
+                }
+            }
+            _ => MacroFieldType::Unknown(value.to_token_stream().to_string()),
+        }
+    }
+}
+
+fn generate_struct_values(
+    fields: &Fields,
+    user_struct_name: &Ident,
+    values_struct_name: &Ident,
+) -> TokenStream {
+    let mut field_types = vec![];
+    let mut field_init = vec![];
+
+    for field in fields {
+        let ident = if let Some(ident) = &field.ident {
+            ident
+        } else {
+            continue;
+        };
+
+        let ty = MacroFieldType::from(&field.ty);
+
+        // fill types
+        match ty {
+            MacroFieldType::Counter => {
+                field_types.push(quote!(#ident: metrics_lockfree::counter::CounterPin));
+                field_init.push(
+                    quote!(#ident: metrics_lockfree::counter::Counter::from(&mut value.#ident)),
+                );
+            }
+            MacroFieldType::Gauge => {
+                field_types.push(quote!(#ident: metrics_lockfree::gauge::GaugePin));
+                field_init
+                    .push(quote!(#ident: metrics_lockfree::gauge::Gauge::from(&mut value.#ident)));
+            }
+            MacroFieldType::CounterWithTags(max_tags) => {
+                let fn_name = generate_tags_global_fn(user_struct_name, ident);
+
+                field_types.push(
+                    quote!(#ident: metrics_lockfree::counter_with_tags::CounterWithTagsPin<#max_tags>),
+                );
+                field_init.push(
+                    quote!(#ident: metrics_lockfree::counter_with_tags::CounterWithTags::from(&mut value.#ident).set_fn(#fn_name)),
+                );
+            }
+            MacroFieldType::Unknown(s) => panic!(
+                "Error: field '{}' has invalid type: '{s}'. It must be 'Counter' or 'Gauge'",
+                ident
+            ),
+        };
+    }
+
+    quote! {
+        #[derive(Default)]
+        pub struct MyMetricsValues {
+            #(#field_types),*
+        }
+
+        impl From<&mut #values_struct_name> for #user_struct_name {
+            fn from(value: &mut #values_struct_name) -> Self {
+                Self {
+                    #(#field_init),*
+                }
+            }
+        }
+    }
+}
+
 fn generate_metrics(ast: &DeriveInput) -> syn::Result<TokenStream> {
     let fields = match &ast.data {
         Data::Struct(v) => &v.fields,
@@ -70,179 +362,28 @@ fn generate_metrics(ast: &DeriveInput) -> syn::Result<TokenStream> {
     };
 
     let static_factory_name = format_ident!("{}", format!("{}Factory", &ast.ident).to_uppercase());
-    let factory_name = format_ident!("{}Factory", &ast.ident);
-    let values_name = format_ident!("{}Values", &ast.ident);
-    let struct_name = ast.ident.clone();
+    let factory_struct_name = format_ident!("{}Factory", &ast.ident);
+    let values_struct_name = format_ident!("{}Values", &ast.ident);
+    let user_struct_name = ast.ident.clone();
 
-    let mut count = 0;
+    let impl_user_struct = generate_impl_user_struct(&user_struct_name, &static_factory_name);
 
-    let mut field_names = vec![];
+    let struct_values = generate_struct_values(fields, &user_struct_name, &values_struct_name);
 
-    let mut field_names_types = vec![];
-
-    let fields: Vec<_> = fields
-        .iter()
-        .filter_map(|field| match &field.ident {
-            Some(ident) => {
-                let t = match &field.ty {
-                    syn::Type::Path(t) => {
-                        if let Some(p) = t.path.get_ident() {
-                            p.to_owned()
-                        } else {
-                            panic!("Error: field '{}' is not a simple type", ident)
-                        }
-                    }
-                    _ => {
-                        // unknown ident type, ignore
-                        // TODO should panic with error message
-                        panic!("Error: field '{}' has invalid type. It must be 'Counter' or 'Gauge'", ident);
-                    }
-                }
-                .to_string();
-
-                let ident_str = ident.to_string();
-
-                let t = match t.as_str() {
-                    "Counter" => {
-                        field_names_types.push(quote!(metrics_lockfree::InternalMetricType::Counter(#ident_str)));
-                        MetricType::Counter
-                    }
-                    "Gauge" => {
-                        field_names_types.push(quote!(metrics_lockfree::InternalMetricType::Gauge(#ident_str)));
-                        MetricType::Gauge
-                    }
-                    _ => panic!(
-                        "Error: field '{}' has invalid type: '{t}'. It must be 'Counter' or 'Gauge'",
-                        ident
-                    ),
-                };
-
-                let ident = ident.to_string();
-                //let doc = format_ident!(
-                //    "{}",
-                //    parse_field_doc_comment(&field.attrs).unwrap_or_default()
-                //);
-                field_names.push(ident.to_token_stream());
-                let idx: usize = count;
-                count += 1;
-
-                match t {
-                    MetricType::Counter => {
-                        let fn_name = format_ident!("add_{}", snakify(&ident));
-                        Some(quote! {
-                            pub fn #fn_name(&mut self, inc: u64) {
-                                //println!("doc is: {}", #doc);
-                                self.add(#idx, inc)
-                            }
-                        })
-                    }
-
-                    MetricType::Gauge => {
-                        let fn_name = format_ident!("set_{}", snakify(&ident));
-                        Some(quote! {
-                            pub fn #fn_name(&mut self, value: u64) {
-                                //println!("doc is: {}", #doc);
-                                self.add(#idx, value)
-                            }
-                        })
-                    }
-                }
-            }
-            None => None,
-        })
-        .collect();
+    let factory = generate_factory(
+        fields,
+        &user_struct_name,
+        &values_struct_name,
+        &factory_struct_name,
+        &static_factory_name,
+    );
 
     Ok(quote! {
-        impl #struct_name {
-            pub fn new() -> #values_name {
-                let mut factory = #static_factory_name.write().unwrap();
-                factory.build()
-            }
+        #impl_user_struct
 
-            pub fn read_lock<'a>() -> std::sync::LockResult<std::sync::RwLockReadGuard<'a, #factory_name>> {
-                #static_factory_name.read()
-            }
-        }
+        #struct_values
 
-        pub struct #values_name {
-            ptr: *mut u64,
-            size: usize,
-        }
-
-        impl #values_name {
-
-            fn new(list: &mut [u64]) -> Self {
-                Self {
-                    ptr: list.as_mut_ptr(),
-                    size: list.len(),
-                }
-            }
-
-            fn add(&mut self, idx: usize, inc: u64) {
-                if idx >= self.size {
-                    panic!("idx overflow");
-                }
-
-                // c'est safe, parce que metric list ne peut pas etre dans deux threads à la fois
-                // il ne faut jamais que cet objet puisse etre cloné
-                // rust interdit un utilisateur de le faire parce que l'objet contient un pointeur
-                unsafe {
-                    let ptr = self.ptr.add(idx);
-                    *ptr += inc;
-                }
-            }
-
-            fn set(&mut self, idx: usize, val: u64) {
-                if idx >= self.size {
-                    panic!("idx overflow");
-                }
-
-                // c'est safe, parce que metric list ne peut pas etre dans deux threads à la fois
-                // il ne faut jamais que cet objet puisse etre cloné
-                // rust interdit un utilisateur de le faire parce que l'objet contient un pointeur
-                unsafe {
-                    let ptr = self.ptr.add(idx);
-                    *ptr = val;
-                }
-            }
-
-            #(#fields)*
-        }
-
-        unsafe impl Send for #values_name {}
-
-        struct #factory_name {
-            metrics: Vec<metrics_lockfree::InternalMetricTypeString>,
-            per_thread_metrics: Vec<Vec<u64>>,
-        }
-
-        impl #factory_name {
-            pub fn new<'a>(array: &[metrics_lockfree::InternalMetricType<'a>]) -> Self {
-                let metrics = array.iter().map(|s| metrics_lockfree::InternalMetricTypeString::from(s)).collect();
-                Self {
-                    metrics,
-                    per_thread_metrics: vec![],
-                }
-            }
-
-            pub fn build(&mut self) -> #values_name {
-                self.per_thread_metrics.push(vec![0; self.metrics.len()]);
-                let last = self.per_thread_metrics.last_mut().unwrap();
-                #values_name ::new(last)
-            }
-
-            pub fn thread(&self) -> &Vec<Vec<u64>> {
-                &self.per_thread_metrics
-            }
-
-            pub fn metrics(&self) -> &Vec<metrics_lockfree::InternalMetricTypeString> {
-                &self.metrics
-            }
-        }
-
-        static #static_factory_name : std::sync::LazyLock<std::sync::RwLock<#factory_name>> =
-            std::sync::LazyLock::new(|| std::sync::RwLock::new(#factory_name ::new(&[ #(#field_names_types),* ])));
-
+        #factory
     })
 }
 
