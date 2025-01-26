@@ -4,7 +4,6 @@ use ahash::{HashMap, HashMapExt};
 pub enum MetricType {
     Counter,
     Gauge,
-    CounterWithTags,
 }
 
 #[derive(Debug)]

@@ -31,7 +31,7 @@ fn snakify(s: &str) -> String {
     let mut output: Vec<char> = s.to_string().to_snake_case().chars().collect();
     let mut num_starts = vec![];
     for (pos, c) in output.iter().enumerate() {
-        if c.is_digit(10) && pos != 0 && !output[pos - 1].is_digit(10) {
+        if c.is_ascii_digit() && pos != 0 && !output[pos - 1].is_ascii_digit() {
             num_starts.push(pos);
         }
     }
@@ -97,7 +97,7 @@ fn generate_factory(
 
     let metrics_tags_static_prefix = format_ident!(
         "{}",
-        format!("{}_TAGS_HASHMAP_", user_struct_name.to_string()).to_uppercase()
+        format!("{}_TAGS_HASHMAP_", user_struct_name).to_uppercase()
     );
 
     for field in fields {
@@ -112,21 +112,6 @@ fn generate_factory(
 
         // fill types
         match ty {
-            MacroFieldType::Counter => {
-                metrics.push(quote! {
-                    let mut value_sum = 0;
-                    factory.threads().iter().for_each(|f| {
-                        value_sum += f.#ident.get();
-                    });
-
-                    metrics.push(metrics_lockfree::prometheus::prometheus_metric_family_build(
-                        metrics_lockfree::types::MetricType::Counter,
-                        #ident_str,
-                        value_sum,
-                        None,
-                    ));
-                });
-            }
             MacroFieldType::Gauge => {
                 metrics.push(quote! {
                     let mut value_sum = 0;
@@ -142,7 +127,7 @@ fn generate_factory(
                     ));
                 });
             }
-            MacroFieldType::CounterWithTags(max_tags) => {
+            MacroFieldType::Counter(max_tags) => {
                 let static_hashmap_name = format_ident!(
                     "{}_{}",
                     metrics_tags_static_prefix,
@@ -156,11 +141,12 @@ fn generate_factory(
                     });
 
                     metrics.push(metrics_lockfree::prometheus::prometheus_metric_family_build(
-                        metrics_lockfree::types::MetricType::CounterWithTags,
+                        metrics_lockfree::types::MetricType::Counter,
                         #ident_str,
                         value_sum,
                         None,
                     ));
+
 
                     // then other tags
                     #static_hashmap_name
@@ -174,8 +160,10 @@ fn generate_factory(
                                 value_sum_tag += f.#ident.get(*id);
                             });
 
+                            println!("{key_value:?}, {id:?}");
+
                             metrics.push(metrics_lockfree::prometheus::prometheus_metric_family_build(
-                                metrics_lockfree::types::MetricType::CounterWithTags,
+                                metrics_lockfree::types::MetricType::Counter,
                                 #ident_str,
                                 value_sum_tag,
                                 Some(key_value),
@@ -252,9 +240,8 @@ fn generate_factory(
 }
 
 enum MacroFieldType {
-    Counter,
     Gauge,
-    CounterWithTags(usize),
+    Counter(usize),
     Unknown(String),
 }
 
@@ -264,9 +251,9 @@ impl From<&syn::Type> for MacroFieldType {
             syn::Type::Path(tp) => {
                 if let Some(p) = tp.path.get_ident() {
                     match p.to_string().as_str() {
-                        "Counter" => MacroFieldType::Counter,
+                        "Counter" => MacroFieldType::Counter(1),
                         "Gauge" => MacroFieldType::Gauge,
-                        s @ _ => MacroFieldType::Unknown(s.to_string()),
+                        s => MacroFieldType::Unknown(s.to_string()),
                     }
                 } else {
                     // faut passer en raw quand il y a une generic, pour l'instant on ignore
@@ -280,7 +267,7 @@ impl From<&syn::Type> for MacroFieldType {
 
                     if ty.len() == 4 && ty[1] == "<" && ty[3] == ">" {
                         if let Ok(max_tags) = ty[2].parse::<usize>() {
-                            return MacroFieldType::CounterWithTags(max_tags);
+                            return MacroFieldType::Counter(max_tags);
                         }
                     }
 
@@ -311,25 +298,17 @@ fn generate_struct_values(
 
         // fill types
         match ty {
-            MacroFieldType::Counter => {
-                field_types.push(quote!(#ident: metrics_lockfree::counter::CounterPin));
-                field_init.push(
-                    quote!(#ident: metrics_lockfree::counter::Counter::from(&mut value.#ident)),
-                );
-            }
             MacroFieldType::Gauge => {
                 field_types.push(quote!(#ident: metrics_lockfree::gauge::GaugePin));
                 field_init
                     .push(quote!(#ident: metrics_lockfree::gauge::Gauge::from(&mut value.#ident)));
             }
-            MacroFieldType::CounterWithTags(max_tags) => {
+            MacroFieldType::Counter(max_tags) => {
                 let fn_name = generate_tags_global_fn(user_struct_name, ident);
 
-                field_types.push(
-                    quote!(#ident: metrics_lockfree::counter_with_tags::CounterWithTagsPin<#max_tags>),
-                );
+                field_types.push(quote!(#ident: metrics_lockfree::counter::CounterPin<#max_tags>));
                 field_init.push(
-                    quote!(#ident: metrics_lockfree::counter_with_tags::CounterWithTags::from(&mut value.#ident).set_fn(#fn_name)),
+                    quote!(#ident: metrics_lockfree::counter::Counter::from(&mut value.#ident).set_fn(#fn_name)),
                 );
             }
             MacroFieldType::Unknown(s) => panic!(

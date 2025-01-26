@@ -12,11 +12,11 @@ pub struct GaugeCell {
 unsafe impl Sync for GaugeCell {}
 
 impl GaugeCell {
-    pub fn get(&self) -> u64 {
+    fn get(&self) -> u64 {
         unsafe { *self.value.get() }
     }
 
-    pub fn as_mut_ptr(&self) -> *mut u64 {
+    fn as_mut_ptr(&self) -> *mut u64 {
         self.value.get()
     }
 }
@@ -26,14 +26,14 @@ impl GaugePin {
         self.value.get()
     }
 
-    pub fn as_mut_ptr(&self) -> *mut u64 {
+    fn as_mut_ptr(&self) -> *mut u64 {
         self.value.as_ref().as_mut_ptr()
     }
 }
 
 // we want this struct to never change address of u64 value
 pub struct GaugePin {
-    pub value: Pin<Box<GaugeCell>>,
+    value: Pin<Box<GaugeCell>>,
 }
 
 impl Default for GaugePin {

@@ -1,6 +1,6 @@
 use std::thread::spawn;
 
-use metrics_lockfree::{counter::Counter, counter_with_tags::CounterWithTags, gauge::Gauge};
+use metrics_lockfree::{counter::Counter, gauge::Gauge};
 
 use metrics_lockfree_macros::Metrics;
 
@@ -10,7 +10,7 @@ pub struct MyMetrics {
     c: Counter,
 
     g: Gauge,
-    ct: CounterWithTags<32>,
+    ct: Counter<32>,
 }
 
 fn main() {
@@ -19,16 +19,16 @@ fn main() {
 
     let mut thread1 = MyMetrics::new().unwrap();
     let t1 = spawn(move || loop {
-        thread1.c.add(1);
+        thread1.c.add(1, None);
         thread1
             .ct
-            .add(1, &[("key_a".to_string(), "val_b".to_string())]);
+            .add(1, Some(&[("key_a".to_string(), "val_b".to_string())]));
         thread1.ct.add(
             1,
-            &[
+            Some(&[
                 ("key_a".to_string(), "val_b".to_string()),
                 ("key_b".to_string(), "val_c".to_string()),
-            ],
+            ]),
         );
 
         std::hint::black_box(&thread1);
@@ -36,13 +36,13 @@ fn main() {
 
     let mut thread2 = MyMetrics::new().unwrap();
     let t2 = spawn(move || loop {
-        thread2.c.add(1);
+        thread2.c.add(1, None);
         thread2.g.set(1);
 
         // for tags
         thread2
             .ct
-            .add(1, &[("key_a".to_string(), "val_a".to_string())]);
+            .add(1, Some(&[("key_a".to_string(), "val_a".to_string())]));
         std::hint::black_box(&thread2);
     });
 

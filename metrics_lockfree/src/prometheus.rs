@@ -17,26 +17,6 @@ pub fn prometheus_metric_family_build(
             let mut metric = Metric::new();
             metric.set_counter(counter);
 
-            m.set_field_type(MetricType::COUNTER);
-            m.mut_metric().push(metric);
-            m
-        }
-        crate::types::MetricType::Gauge => {
-            let mut gauge = Gauge::new();
-            gauge.set_value(value as f64);
-            let mut metric = Metric::new();
-            metric.set_gauge(gauge);
-
-            m.set_field_type(prometheus::proto::MetricType::GAUGE);
-            m.mut_metric().push(metric);
-            m
-        }
-        crate::types::MetricType::CounterWithTags => {
-            let mut counter = Counter::new();
-            counter.set_value(value as f64);
-            let mut metric = Metric::new();
-            metric.set_counter(counter);
-
             if let Some(tags) = tags {
                 let mut labels = vec![];
                 tags.iter().for_each(|(k, v)| {
@@ -49,6 +29,16 @@ pub fn prometheus_metric_family_build(
             }
 
             m.set_field_type(MetricType::COUNTER);
+            m.mut_metric().push(metric);
+            m
+        }
+        crate::types::MetricType::Gauge => {
+            let mut gauge = Gauge::new();
+            gauge.set_value(value as f64);
+            let mut metric = Metric::new();
+            metric.set_gauge(gauge);
+
+            m.set_field_type(prometheus::proto::MetricType::GAUGE);
             m.mut_metric().push(metric);
             m
         }
